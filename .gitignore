@@ -5,10 +5,11 @@ dist-ssr/
 build/
 *.local
 
-# Environment files (keep the checked-in examples)
+# Environment files (keep the checked-in, secret-free ones)
 .env
 .env.*
 !.env.example
+!.env.production
 
 # Test coverage
 coverage/
