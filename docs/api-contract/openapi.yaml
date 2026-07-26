@@ -1,0 +1,1175 @@
+openapi: 3.1.0
+info:
+  title: EventCheck API
+  version: 1.0.0
+  description: |
+    Contrato de API do EventCheck — plataforma de eventos com check-in via QR Code.
+
+    Este documento e a UNICA fonte de verdade compartilhada entre o frontend
+    (/apps/web) e o backend (/apps/api). Nenhum dos lados pode alterar formatos
+    de request/response sem atualizar este arquivo primeiro, via pull request
+    revisado pelas duas partes.
+
+    ## Autenticacao
+    A identidade e provida pelo Supabase Auth. O frontend autentica o organizador
+    direto no Supabase e recebe um JWT (HS256, assinado com o JWT secret do
+    projeto). Esse JWT vai em `Authorization: Bearer <token>` em toda rota
+    protegida. O backend NAO emite tokens: ele apenas valida a assinatura, o
+    `exp` e a `aud`, e usa a claim `sub` como `organizer_id`.
+
+    ## Formato de erro
+    Toda resposta de erro (4xx/5xx) usa o mesmo envelope `Error`. O campo
+    `error.code` e estavel e serve para o frontend decidir o que mostrar; o
+    campo `error.message` e texto legivel em ingles e pode mudar.
+
+    ## Datas
+    Todo timestamp e ISO 8601 em UTC com sufixo `Z` (ex.: 2026-08-14T19:30:00Z).
+    O campo `timezone` do evento (IANA, ex.: America/Sao_Paulo) e usado apenas
+    para exibicao no cliente.
+
+    ## Fases de implementacao
+    - Fase 1: /health, /me, CRUD de eventos
+    - Fase 2: emissao de ingressos e check-in atomico
+    - Fase 3: estatisticas, relatorio agregado e consulta publica de ingresso
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+servers:
+  - url: http://localhost:8000
+    description: Desenvolvimento local
+  - url: https://eventcheck-api.onrender.com
+    description: Producao (Render free tier)
+
+tags:
+  - name: system
+    description: Health check e metadados
+  - name: events
+    description: Criacao e gestao de eventos
+  - name: tickets
+    description: Emissao e gestao de ingressos
+  - name: check-ins
+    description: Validacao de entrada via QR Code
+  - name: analytics
+    description: Estatisticas ao vivo e dados agregados pos-evento
+  - name: public
+    description: Rotas sem autenticacao, acessadas pelo participante
+
+security:
+  - bearerAuth: []
+
+paths:
+  /health:
+    get:
+      tags: [system]
+      summary: Health check
+      description: |
+        Rota publica usada pelo GitHub Actions para manter a instancia do Render
+        acordada. Nao deve tocar no banco de dados em caminho critico; o campo
+        `database` faz um SELECT 1 com timeout curto e degrada para "down" sem
+        derrubar a resposta.
+      operationId: getHealth
+      security: []
+      responses:
+        '200':
+          description: Servico no ar
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, version, uptime_seconds]
+                properties:
+                  status:
+                    type: string
+                    enum: [ok, degraded]
+                  version:
+                    type: string
+                    example: 1.0.0
+                  uptime_seconds:
+                    type: integer
+                    example: 3612
+                  database:
+                    type: string
+                    enum: [up, down]
+
+  /api/v1/me:
+    get:
+      tags: [system]
+      summary: Perfil do organizador autenticado
+      description: |
+        Retorna os dados do organizador derivados do JWT. Na primeira chamada o
+        backend cria o registro local em `organizers` (upsert por `sub`), o que
+        dispensa um fluxo de cadastro proprio.
+      operationId: getMe
+      responses:
+        '200':
+          description: Perfil do organizador
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Organizer'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/events:
+    get:
+      tags: [events]
+      summary: Lista os eventos do organizador autenticado
+      operationId: listEvents
+      parameters:
+        - name: status
+          in: query
+          description: Filtra por status. Pode ser repetido.
+          schema:
+            type: array
+            items:
+              $ref: '#/components/schemas/EventStatus'
+          style: form
+          explode: true
+        - name: search
+          in: query
+          description: Busca case-insensitive no titulo do evento.
+          schema:
+            type: string
+            maxLength: 120
+        - name: page
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: page_size
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: sort
+          in: query
+          schema:
+            type: string
+            enum: [starts_at, -starts_at, created_at, -created_at]
+            default: -starts_at
+      responses:
+        '200':
+          description: Pagina de eventos
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Page'
+                  - type: object
+                    required: [items]
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/Event'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [events]
+      summary: Cria um evento
+      description: O evento nasce sempre com status `draft`.
+      operationId: createEvent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EventCreate'
+      responses:
+        '201':
+          description: Evento criado
+          headers:
+            Location:
+              schema:
+                type: string
+              description: URI do recurso criado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Event'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /api/v1/events/{event_id}:
+    parameters:
+      - $ref: '#/components/parameters/EventId'
+    get:
+      tags: [events]
+      summary: Detalhe de um evento
+      operationId: getEvent
+      responses:
+        '200':
+          description: Evento
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Event'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      tags: [events]
+      summary: Atualiza um evento
+      description: |
+        Atualizacao parcial. Campos ausentes no corpo permanecem inalterados.
+        Eventos com status `finished` ou `cancelled` sao imutaveis (409).
+      operationId: updateEvent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EventUpdate'
+      responses:
+        '200':
+          description: Evento atualizado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Event'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+    delete:
+      tags: [events]
+      summary: Cancela um evento
+      description: |
+        Soft delete. O evento passa para `cancelled` e todos os ingressos
+        `valid` passam para `revoked`. Historico de check-ins e preservado.
+      operationId: cancelEvent
+      responses:
+        '204':
+          description: Evento cancelado
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/v1/events/{event_id}/publish:
+    parameters:
+      - $ref: '#/components/parameters/EventId'
+    post:
+      tags: [events]
+      summary: Publica um evento
+      description: |
+        Transicao `draft` -> `published`. Exige `starts_at` no futuro e
+        `capacity` definida. Depois de publicado, o evento aceita emissao de
+        ingressos.
+      operationId: publishEvent
+      responses:
+        '200':
+          description: Evento publicado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Event'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/v1/events/{event_id}/tickets:
+    parameters:
+      - $ref: '#/components/parameters/EventId'
+    get:
+      tags: [tickets]
+      summary: Lista os ingressos de um evento
+      operationId: listTickets
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: array
+            items:
+              $ref: '#/components/schemas/TicketStatus'
+          style: form
+          explode: true
+        - name: search
+          in: query
+          description: Busca case-insensitive por nome ou e-mail do participante.
+          schema:
+            type: string
+        - name: page
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: page_size
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+      responses:
+        '200':
+          description: Pagina de ingressos. O `qr_token` nunca aparece aqui.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Page'
+                  - type: object
+                    required: [items]
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/Ticket'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    post:
+      tags: [tickets]
+      summary: Emite um lote de ingressos
+      description: |
+        Emissao em lote (1 a 500 por chamada). Operacao transacional: ou todos os
+        ingressos sao criados, ou nenhum. Se a soma dos ingressos existentes com
+        os novos ultrapassar `capacity`, retorna 409 `EVENT_CAPACITY_EXCEEDED`.
+
+        Esta e a UNICA resposta da API que devolve o `qr_token` em texto claro.
+        O backend guarda apenas o SHA-256 do token; se o organizador perder o
+        ingresso, o caminho e reemitir (rotacionar o token), nao recuperar.
+      operationId: issueTickets
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TicketBatchCreate'
+      responses:
+        '201':
+          description: Ingressos emitidos, com os tokens em texto claro
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/TicketWithToken'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /api/v1/tickets/{ticket_id}:
+    parameters:
+      - $ref: '#/components/parameters/TicketId'
+    get:
+      tags: [tickets]
+      summary: Detalhe de um ingresso
+      operationId: getTicket
+      responses:
+        '200':
+          description: Ingresso
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Ticket'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/tickets/{ticket_id}/revoke:
+    parameters:
+      - $ref: '#/components/parameters/TicketId'
+    post:
+      tags: [tickets]
+      summary: Revoga um ingresso
+      description: |
+        Invalida o ingresso para check-in. Ingressos ja com status `checked_in`
+        retornam 409 — o historico de presenca nao e reescrito.
+      operationId: revokeTicket
+      responses:
+        '200':
+          description: Ingresso revogado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Ticket'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/v1/tickets/{ticket_id}/reissue:
+    parameters:
+      - $ref: '#/components/parameters/TicketId'
+    post:
+      tags: [tickets]
+      summary: Reemite o QR Code de um ingresso
+      description: |
+        Gera um novo `qr_token`, invalidando o anterior. Usado quando o
+        participante perde o ingresso. So funciona em ingressos `valid`.
+      operationId: reissueTicket
+      responses:
+        '200':
+          description: Ingresso com novo token em texto claro
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TicketWithToken'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/v1/events/{event_id}/check-ins:
+    parameters:
+      - $ref: '#/components/parameters/EventId'
+    post:
+      tags: [check-ins]
+      summary: Valida um QR Code e registra a entrada
+      description: |
+        Coracao do sistema. A validacao e atomica: a transacao faz
+        `SELECT ... FOR UPDATE` na linha do ingresso antes de conferir o status,
+        de modo que dois scanners lendo o mesmo QR ao mesmo tempo produzam
+        exatamente um 201 e um 409.
+
+        O frontend do scanner mapeia cada `error.code` para um estado visual
+        distinto (verde / amarelo / vermelho) — por isso os codigos sao estaveis.
+      operationId: createCheckIn
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CheckInCreate'
+      responses:
+        '201':
+          description: Check-in registrado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CheckInResult'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: |
+            Token nao corresponde a nenhum ingresso (`TICKET_NOT_FOUND`) ou o
+            evento nao existe (`EVENT_NOT_FOUND`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: |
+            Ingresso ja utilizado (`TICKET_ALREADY_CHECKED_IN`, com o check-in
+            original em `error.details`), revogado (`TICKET_REVOKED`),
+            pertencente a outro evento (`TICKET_WRONG_EVENT`) ou evento fora da
+            janela de check-in (`EVENT_NOT_ACTIVE`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                alreadyCheckedIn:
+                  value:
+                    error:
+                      code: TICKET_ALREADY_CHECKED_IN
+                      message: This ticket was already used.
+                      details:
+                        ticket_id: 6f1c2d3e-4a5b-4c6d-8e9f-0a1b2c3d4e5f
+                        attendee_name: Ana Souza
+                        checked_in_at: '2026-08-14T19:32:11Z'
+                        device_label: Portaria A
+        '422':
+          $ref: '#/components/responses/ValidationError'
+    get:
+      tags: [check-ins]
+      summary: Lista os check-ins de um evento
+      description: |
+        Ordenado do mais recente para o mais antigo. O dashboard usa esta rota
+        para o carregamento inicial e depois recebe as novas linhas via Supabase
+        Realtime, sem polling.
+      operationId: listCheckIns
+      parameters:
+        - name: since
+          in: query
+          description: Retorna apenas check-ins posteriores a este timestamp.
+          schema:
+            type: string
+            format: date-time
+        - name: page
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: page_size
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+      responses:
+        '200':
+          description: Pagina de check-ins
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Page'
+                  - type: object
+                    required: [items]
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/CheckIn'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/events/{event_id}/stats:
+    parameters:
+      - $ref: '#/components/parameters/EventId'
+    get:
+      tags: [analytics]
+      summary: Estatisticas ao vivo do evento
+      description: Alimenta os cartoes e o grafico do dashboard do organizador.
+      operationId: getEventStats
+      parameters:
+        - name: bucket_minutes
+          in: query
+          description: Tamanho da janela de agregacao da linha do tempo.
+          schema:
+            type: integer
+            enum: [5, 10, 15, 30, 60]
+            default: 15
+      responses:
+        '200':
+          description: Estatisticas
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EventStats'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/events/{event_id}/report-data:
+    parameters:
+      - $ref: '#/components/parameters/EventId'
+    get:
+      tags: [analytics]
+      summary: Dados agregados para o relatorio pos-evento
+      description: |
+        Payload consumido pela feature de IA de resumo pos-evento. Contem apenas
+        numeros agregados — nenhum dado pessoal de participante — para que possa
+        ser enviado a um modelo de linguagem sem expor a base.
+      operationId: getEventReportData
+      responses:
+        '200':
+          description: Dados agregados
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EventReportData'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/public/tickets/{qr_token}:
+    parameters:
+      - name: qr_token
+        in: path
+        required: true
+        schema:
+          type: string
+          minLength: 32
+          maxLength: 64
+    get:
+      tags: [public]
+      summary: Consulta publica de ingresso pelo token
+      description: |
+        Usada pela pagina que o participante abre no celular. O proprio token e a
+        credencial, entao a rota nao exige JWT — mas devolve uma visao reduzida
+        do ingresso e e limitada a 30 requisicoes por minuto por IP.
+      operationId: getPublicTicket
+      security: []
+      responses:
+        '200':
+          description: Visao publica do ingresso
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PublicTicket'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          description: Excesso de requisicoes
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT emitido pelo Supabase Auth, validado pelo backend com o JWT secret do projeto.
+
+  parameters:
+    EventId:
+      name: event_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    TicketId:
+      name: ticket_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+  responses:
+    Unauthorized:
+      description: Token ausente, invalido ou expirado
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              code: UNAUTHORIZED
+              message: Missing or invalid credentials.
+    NotFound:
+      description: Recurso inexistente ou pertencente a outro organizador
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              code: EVENT_NOT_FOUND
+              message: Event not found.
+    Conflict:
+      description: Estado atual do recurso nao permite a operacao
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    ValidationError:
+      description: Corpo da requisicao invalido
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              code: VALIDATION_ERROR
+              message: Request body is invalid.
+              details:
+                fields:
+                  - field: starts_at
+                    message: must be in the future
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              description: |
+                Codigo estavel. Valores possiveis: UNAUTHORIZED, FORBIDDEN,
+                VALIDATION_ERROR, EVENT_NOT_FOUND, EVENT_NOT_ACTIVE,
+                EVENT_IMMUTABLE, EVENT_CAPACITY_EXCEEDED, TICKET_NOT_FOUND,
+                TICKET_ALREADY_CHECKED_IN, TICKET_REVOKED, TICKET_WRONG_EVENT,
+                RATE_LIMITED, INTERNAL_ERROR.
+              example: TICKET_ALREADY_CHECKED_IN
+            message:
+              type: string
+              description: Texto legivel em ingles, destinado a logs e fallback de UI.
+            details:
+              type: object
+              additionalProperties: true
+              description: Contexto adicional especifico do codigo de erro.
+
+    Page:
+      type: object
+      required: [page, page_size, total, total_pages]
+      properties:
+        page:
+          type: integer
+          example: 1
+        page_size:
+          type: integer
+          example: 20
+        total:
+          type: integer
+          example: 137
+        total_pages:
+          type: integer
+          example: 7
+
+    Organizer:
+      type: object
+      required: [id, email, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Igual a claim `sub` do JWT.
+        email:
+          type: string
+          format: email
+        display_name:
+          type: [string, 'null']
+        created_at:
+          type: string
+          format: date-time
+
+    EventStatus:
+      type: string
+      enum: [draft, published, finished, cancelled]
+
+    Event:
+      type: object
+      required:
+        - id
+        - organizer_id
+        - title
+        - starts_at
+        - ends_at
+        - timezone
+        - capacity
+        - status
+        - tickets_issued
+        - checked_in_count
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        organizer_id:
+          type: string
+          format: uuid
+        title:
+          type: string
+          minLength: 3
+          maxLength: 120
+        description:
+          type: [string, 'null']
+          maxLength: 5000
+        starts_at:
+          type: string
+          format: date-time
+        ends_at:
+          type: string
+          format: date-time
+        timezone:
+          type: string
+          description: Identificador IANA.
+          example: America/Sao_Paulo
+        venue_name:
+          type: [string, 'null']
+          maxLength: 160
+        address:
+          type: [string, 'null']
+          maxLength: 300
+        capacity:
+          type: integer
+          minimum: 1
+          maximum: 100000
+        status:
+          $ref: '#/components/schemas/EventStatus'
+        tickets_issued:
+          type: integer
+          description: Contagem de ingressos nao revogados.
+        checked_in_count:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    EventCreate:
+      type: object
+      required: [title, starts_at, ends_at, timezone, capacity]
+      properties:
+        title:
+          type: string
+          minLength: 3
+          maxLength: 120
+        description:
+          type: [string, 'null']
+          maxLength: 5000
+        starts_at:
+          type: string
+          format: date-time
+        ends_at:
+          type: string
+          format: date-time
+          description: Deve ser posterior a `starts_at`.
+        timezone:
+          type: string
+          example: America/Sao_Paulo
+        venue_name:
+          type: [string, 'null']
+        address:
+          type: [string, 'null']
+        capacity:
+          type: integer
+          minimum: 1
+          maximum: 100000
+
+    EventUpdate:
+      type: object
+      description: Todos os campos sao opcionais; ao menos um deve ser enviado.
+      minProperties: 1
+      properties:
+        title:
+          type: string
+          minLength: 3
+          maxLength: 120
+        description:
+          type: [string, 'null']
+        starts_at:
+          type: string
+          format: date-time
+        ends_at:
+          type: string
+          format: date-time
+        timezone:
+          type: string
+        venue_name:
+          type: [string, 'null']
+        address:
+          type: [string, 'null']
+        capacity:
+          type: integer
+          minimum: 1
+          maximum: 100000
+
+    TicketStatus:
+      type: string
+      enum: [valid, checked_in, revoked]
+
+    Ticket:
+      type: object
+      required:
+        - id
+        - event_id
+        - attendee_name
+        - status
+        - issued_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        event_id:
+          type: string
+          format: uuid
+        attendee_name:
+          type: string
+          minLength: 1
+          maxLength: 120
+        attendee_email:
+          type: [string, 'null']
+          format: email
+        tier:
+          type: [string, 'null']
+          maxLength: 40
+          description: 'Categoria do ingresso (ex.: Standard, VIP).'
+          example: Standard
+        status:
+          $ref: '#/components/schemas/TicketStatus'
+        issued_at:
+          type: string
+          format: date-time
+        checked_in_at:
+          type: [string, 'null']
+          format: date-time
+
+    TicketWithToken:
+      allOf:
+        - $ref: '#/components/schemas/Ticket'
+        - type: object
+          required: [qr_token, qr_payload]
+          properties:
+            qr_token:
+              type: string
+              description: |
+                Token opaco de 32 bytes em base64url. Retornado apenas na emissao
+                e na reemissao; o banco guarda somente o SHA-256.
+              example: 8Jd2mQxR7pV0aZ3nL5tYbC1eH6kU9wS4
+            qr_payload:
+              type: string
+              description: |
+                String exata a ser codificada no QR Code, no formato
+                `EVCK1:<qr_token>`. O scanner rejeita localmente qualquer
+                leitura sem esse prefixo antes de chamar a API.
+              example: EVCK1:8Jd2mQxR7pV0aZ3nL5tYbC1eH6kU9wS4
+
+    TicketBatchCreate:
+      type: object
+      required: [attendees]
+      properties:
+        attendees:
+          type: array
+          minItems: 1
+          maxItems: 500
+          items:
+            type: object
+            required: [attendee_name]
+            properties:
+              attendee_name:
+                type: string
+                minLength: 1
+                maxLength: 120
+              attendee_email:
+                type: [string, 'null']
+                format: email
+              tier:
+                type: [string, 'null']
+                maxLength: 40
+
+    CheckInCreate:
+      type: object
+      required: [qr_token]
+      properties:
+        qr_token:
+          type: string
+          minLength: 32
+          maxLength: 64
+          description: Token extraido do QR, ja sem o prefixo `EVCK1:`.
+        device_label:
+          type: [string, 'null']
+          maxLength: 60
+          description: 'Identificacao livre do ponto de entrada (ex.: "Portaria A").'
+
+    CheckIn:
+      type: object
+      required: [id, ticket_id, event_id, checked_in_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        ticket_id:
+          type: string
+          format: uuid
+        event_id:
+          type: string
+          format: uuid
+        attendee_name:
+          type: string
+        checked_in_at:
+          type: string
+          format: date-time
+        device_label:
+          type: [string, 'null']
+        operator_id:
+          type: [string, 'null']
+          format: uuid
+          description: Organizador autenticado que operou o scanner.
+
+    CheckInResult:
+      type: object
+      required: [check_in, ticket, event_stats]
+      properties:
+        check_in:
+          $ref: '#/components/schemas/CheckIn'
+        ticket:
+          $ref: '#/components/schemas/Ticket'
+        event_stats:
+          type: object
+          description: Contadores no instante do check-in, para atualizar o scanner sem outra chamada.
+          required: [tickets_issued, checked_in_count]
+          properties:
+            tickets_issued:
+              type: integer
+            checked_in_count:
+              type: integer
+
+    TimelineBucket:
+      type: object
+      required: [bucket_start, count]
+      properties:
+        bucket_start:
+          type: string
+          format: date-time
+        count:
+          type: integer
+
+    EventStats:
+      type: object
+      required:
+        - event_id
+        - tickets_issued
+        - checked_in_count
+        - pending_count
+        - revoked_count
+        - attendance_rate
+        - timeline
+      properties:
+        event_id:
+          type: string
+          format: uuid
+        tickets_issued:
+          type: integer
+        checked_in_count:
+          type: integer
+        pending_count:
+          type: integer
+        revoked_count:
+          type: integer
+        attendance_rate:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+          description: checked_in_count / tickets_issued, com 0 quando nao ha ingressos.
+        capacity_usage:
+          type: number
+          format: float
+          minimum: 0
+          description: tickets_issued / capacity.
+        first_check_in_at:
+          type: [string, 'null']
+          format: date-time
+        last_check_in_at:
+          type: [string, 'null']
+          format: date-time
+        peak_window:
+          type: [object, 'null']
+          description: Janela com maior volume de entradas.
+          properties:
+            starts_at:
+              type: string
+              format: date-time
+            ends_at:
+              type: string
+              format: date-time
+            count:
+              type: integer
+        timeline:
+          type: array
+          items:
+            $ref: '#/components/schemas/TimelineBucket'
+
+    EventReportData:
+      type: object
+      required: [event, stats, tiers]
+      properties:
+        event:
+          type: object
+          required: [id, title, starts_at, ends_at, timezone, capacity]
+          properties:
+            id:
+              type: string
+              format: uuid
+            title:
+              type: string
+            starts_at:
+              type: string
+              format: date-time
+            ends_at:
+              type: string
+              format: date-time
+            timezone:
+              type: string
+            capacity:
+              type: integer
+            venue_name:
+              type: [string, 'null']
+        stats:
+          $ref: '#/components/schemas/EventStats'
+        tiers:
+          type: array
+          description: Quebra por categoria de ingresso.
+          items:
+            type: object
+            required: [tier, issued, checked_in]
+            properties:
+              tier:
+                type: [string, 'null']
+              issued:
+                type: integer
+              checked_in:
+                type: integer
+        no_show_count:
+          type: integer
+          description: Ingressos validos que nunca foram utilizados.
+        median_minutes_before_start:
+          type: [number, 'null']
+          description: Mediana, em minutos, entre o check-in e o inicio do evento. Negativo indica entrada apos o inicio.
+
+    PublicTicket:
+      type: object
+      required: [attendee_name, status, event]
+      properties:
+        attendee_name:
+          type: string
+        tier:
+          type: [string, 'null']
+        status:
+          $ref: '#/components/schemas/TicketStatus'
+        checked_in_at:
+          type: [string, 'null']
+          format: date-time
+        event:
+          type: object
+          required: [title, starts_at, timezone]
+          properties:
+            title:
+              type: string
+            starts_at:
+              type: string
+              format: date-time
+            ends_at:
+              type: string
+              format: date-time
+            timezone:
+              type: string
+            venue_name:
+              type: [string, 'null']
+            address:
+              type: [string, 'null']
