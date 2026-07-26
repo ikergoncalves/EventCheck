@@ -1,0 +1,5 @@
+#!/bin/sh
+if grep -qiE '^(co-authored-by|generated with|🤖)' "$1"; then
+  echo "Blocked: commit message contains a co-author or tool reference." >&2
+  exit 1
+fi
