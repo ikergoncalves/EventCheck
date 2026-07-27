@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: EventCheck API
-  version: 1.1.0
+  version: 1.2.0
   description: |
     Contrato de API do EventCheck — plataforma de eventos com check-in via QR Code.
 
@@ -31,6 +31,11 @@ info:
     Um evento aceita check-in quando `status == published` **e** o instante
     atual esta entre `starts_at - 12h` e `ends_at + 2h`. Fora dessa janela a
     API responde 409 `EVENT_NOT_ACTIVE`.
+
+    Os dois limites sao **inclusivos**: exatamente em `starts_at - 12h` e
+    exatamente em `ends_at + 2h` o check-in ainda e aceito. Isso mantem as duas
+    regras desta secao coerentes entre si — um evento e `finished` exatamente
+    quando a sua janela fechou, nem um instante antes.
 
     Nao existe agendador no projeto: um evento `published` cujo `ends_at + 2h`
     ja passou e promovido a `finished` de forma preguicosa, na primeira leitura
@@ -230,6 +235,12 @@ paths:
       description: |
         Atualizacao parcial. Campos ausentes no corpo permanecem inalterados.
         Eventos com status `finished` ou `cancelled` sao imutaveis (409).
+
+        Em um evento `published`, `ends_at` nao pode ser movido para o passado:
+        a resposta e 422 `VALIDATION_ERROR` no campo `ends_at`. Encerrar um
+        evento antes da hora nao e uma operacao suportada nesta versao — o
+        evento se encerra sozinho quando a janela de check-in fecha, e editar
+        datas nao deve virar a porta dos fundos para isso.
       operationId: updateEvent
       requestBody:
         required: true
@@ -258,6 +269,11 @@ paths:
       description: |
         Soft delete. O evento passa para `cancelled` e todos os ingressos
         `valid` passam para `revoked`. Historico de check-ins e preservado.
+
+        Eventos `finished` ou `cancelled` respondem 409 `EVENT_IMMUTABLE` — e
+        isso inclui os que viraram `finished` sozinhos pela transicao
+        preguicosa. Cancelar um evento que ja aconteceu revogaria ingressos de
+        quem compareceu e reescreveria a presenca depois do fato.
       operationId: cancelEvent
       responses:
         '204':
@@ -473,11 +489,12 @@ paths:
         o mesmo QR lido na mesma situacao tem que produzir o mesmo codigo no
         mock e no backend.
 
-        1. token nao corresponde a nenhum ingresso -> 404 `TICKET_NOT_FOUND`
-        2. ingresso pertence a outro evento -> 409 `TICKET_WRONG_EVENT`
-        3. evento fora da janela de check-in -> 409 `EVENT_NOT_ACTIVE`
-        4. ingresso revogado -> 409 `TICKET_REVOKED`
-        5. ingresso ja utilizado -> 409 `TICKET_ALREADY_CHECKED_IN`
+        1. evento inexistente ou de outro organizador -> 404 `EVENT_NOT_FOUND`
+        2. token nao corresponde a nenhum ingresso -> 404 `TICKET_NOT_FOUND`
+        3. ingresso pertence a outro evento -> 409 `TICKET_WRONG_EVENT`
+        4. evento fora da janela de check-in -> 409 `EVENT_NOT_ACTIVE`
+        5. ingresso revogado -> 409 `TICKET_REVOKED`
+        6. ingresso ja utilizado -> 409 `TICKET_ALREADY_CHECKED_IN`
       operationId: createCheckIn
       requestBody:
         required: true

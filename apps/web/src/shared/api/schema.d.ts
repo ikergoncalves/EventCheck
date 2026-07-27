@@ -87,6 +87,11 @@ export interface paths {
          * Cancela um evento
          * @description Soft delete. O evento passa para `cancelled` e todos os ingressos
          *     `valid` passam para `revoked`. Historico de check-ins e preservado.
+         *
+         *     Eventos `finished` ou `cancelled` respondem 409 `EVENT_IMMUTABLE` — e
+         *     isso inclui os que viraram `finished` sozinhos pela transicao
+         *     preguicosa. Cancelar um evento que ja aconteceu revogaria ingressos de
+         *     quem compareceu e reescreveria a presenca depois do fato.
          */
         delete: operations["cancelEvent"];
         options?: never;
@@ -95,6 +100,12 @@ export interface paths {
          * Atualiza um evento
          * @description Atualizacao parcial. Campos ausentes no corpo permanecem inalterados.
          *     Eventos com status `finished` ou `cancelled` sao imutaveis (409).
+         *
+         *     Em um evento `published`, `ends_at` nao pode ser movido para o passado:
+         *     a resposta e 422 `VALIDATION_ERROR` no campo `ends_at`. Encerrar um
+         *     evento antes da hora nao e uma operacao suportada nesta versao — o
+         *     evento se encerra sozinho quando a janela de check-in fecha, e editar
+         *     datas nao deve virar a porta dos fundos para isso.
          */
         patch: operations["updateEvent"];
         trace?: never;
@@ -248,11 +259,12 @@ export interface paths {
          *     o mesmo QR lido na mesma situacao tem que produzir o mesmo codigo no
          *     mock e no backend.
          *
-         *     1. token nao corresponde a nenhum ingresso -> 404 `TICKET_NOT_FOUND`
-         *     2. ingresso pertence a outro evento -> 409 `TICKET_WRONG_EVENT`
-         *     3. evento fora da janela de check-in -> 409 `EVENT_NOT_ACTIVE`
-         *     4. ingresso revogado -> 409 `TICKET_REVOKED`
-         *     5. ingresso ja utilizado -> 409 `TICKET_ALREADY_CHECKED_IN`
+         *     1. evento inexistente ou de outro organizador -> 404 `EVENT_NOT_FOUND`
+         *     2. token nao corresponde a nenhum ingresso -> 404 `TICKET_NOT_FOUND`
+         *     3. ingresso pertence a outro evento -> 409 `TICKET_WRONG_EVENT`
+         *     4. evento fora da janela de check-in -> 409 `EVENT_NOT_ACTIVE`
+         *     5. ingresso revogado -> 409 `TICKET_REVOKED`
+         *     6. ingresso ja utilizado -> 409 `TICKET_ALREADY_CHECKED_IN`
          */
         post: operations["createCheckIn"];
         delete?: never;
