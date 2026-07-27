@@ -1,0 +1,25 @@
+{
+  "name": "eventcheck",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Event platform with QR Code attendee check-in.",
+  "license": "MIT",
+  "author": "Iker Gonçalves",
+  "type": "module",
+  "workspaces": [
+    "apps/web"
+  ],
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "scripts": {
+    "dev": "npm run dev --workspace apps/web",
+    "build": "npm run build --workspace apps/web",
+    "preview": "npm run preview --workspace apps/web",
+    "lint": "npm run lint --workspace apps/web",
+    "format": "npm run format --workspace apps/web",
+    "format:check": "npm run format:check --workspace apps/web",
+    "test": "npm run test --workspace apps/web",
+    "api:types": "npm run api:types --workspace apps/web"
+  }
+}
