@@ -243,6 +243,16 @@ export interface paths {
          *
          *     O frontend do scanner mapeia cada `error.code` para um estado visual
          *     distinto (verde / amarelo / vermelho) — por isso os codigos sao estaveis.
+         *
+         *     Precedencia dos erros, nesta ordem exata. Os dois lados dependem dela:
+         *     o mesmo QR lido na mesma situacao tem que produzir o mesmo codigo no
+         *     mock e no backend.
+         *
+         *     1. token nao corresponde a nenhum ingresso -> 404 `TICKET_NOT_FOUND`
+         *     2. ingresso pertence a outro evento -> 409 `TICKET_WRONG_EVENT`
+         *     3. evento fora da janela de check-in -> 409 `EVENT_NOT_ACTIVE`
+         *     4. ingresso revogado -> 409 `TICKET_REVOKED`
+         *     5. ingresso ja utilizado -> 409 `TICKET_ALREADY_CHECKED_IN`
          */
         post: operations["createCheckIn"];
         delete?: never;
@@ -328,14 +338,16 @@ export interface components {
         Error: {
             error: {
                 /**
-                 * @description Codigo estavel. Valores possiveis: UNAUTHORIZED, FORBIDDEN,
-                 *     VALIDATION_ERROR, EVENT_NOT_FOUND, EVENT_NOT_ACTIVE,
-                 *     EVENT_IMMUTABLE, EVENT_CAPACITY_EXCEEDED, TICKET_NOT_FOUND,
-                 *     TICKET_ALREADY_CHECKED_IN, TICKET_REVOKED, TICKET_WRONG_EVENT,
-                 *     RATE_LIMITED, INTERNAL_ERROR.
+                 * @description Codigo estavel de erro. O frontend faz `switch` sobre ele com
+                 *     exaustividade verificada pelo compilador, entao a lista e
+                 *     fechada: introduzir um codigo novo exige alterar este contrato.
+                 *
+                 *     Nao existe `FORBIDDEN`: recurso de outro organizador responde
+                 *     404, para nao confirmar a existencia de dados alheios.
                  * @example TICKET_ALREADY_CHECKED_IN
+                 * @enum {string}
                  */
-                code: string;
+                code: "UNAUTHORIZED" | "VALIDATION_ERROR" | "EVENT_NOT_FOUND" | "EVENT_NOT_ACTIVE" | "EVENT_IMMUTABLE" | "EVENT_CAPACITY_EXCEEDED" | "TICKET_NOT_FOUND" | "TICKET_ALREADY_CHECKED_IN" | "TICKET_REVOKED" | "TICKET_WRONG_EVENT" | "RATE_LIMITED" | "INTERNAL_ERROR";
                 /** @description Texto legivel em ingles, destinado a logs e fallback de UI. */
                 message: string;
                 /** @description Contexto adicional especifico do codigo de erro. */
@@ -366,7 +378,13 @@ export interface components {
             /** Format: date-time */
             created_at: string;
         };
-        /** @enum {string} */
+        /**
+         * @description `draft` -> `published` via a rota de publicacao; `published` ->
+         *     `finished` de forma preguicosa depois de `ends_at + 2h` (ver "Janela de
+         *     check-in"); `cancelled` vem do soft delete. `finished` e `cancelled`
+         *     sao terminais.
+         * @enum {string}
+         */
         EventStatus: "draft" | "published" | "finished" | "cancelled";
         Event: {
             /** Format: uuid */
@@ -482,7 +500,7 @@ export interface components {
             ticket_id: string;
             /** Format: uuid */
             event_id: string;
-            attendee_name?: string;
+            attendee_name: string;
             /** Format: date-time */
             checked_in_at: string;
             device_label?: string | null;
