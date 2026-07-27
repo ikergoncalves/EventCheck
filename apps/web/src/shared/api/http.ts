@@ -66,8 +66,9 @@ export class ApiError extends Error {
 
 /** Best-effort mapping when a response is not shaped like the envelope. */
 function fallbackCodeForStatus(status: number): ApiErrorCode {
-  if (status === 401) return 'UNAUTHORIZED'
-  if (status === 403) return 'FORBIDDEN'
+  // The contract has no `FORBIDDEN`: another organizer's resource answers 404.
+  // A bare 403 can only come from infrastructure, so treat it as an auth problem.
+  if (status === 401 || status === 403) return 'UNAUTHORIZED'
   if (status === 404) return 'EVENT_NOT_FOUND'
   if (status === 422) return 'VALIDATION_ERROR'
   if (status === 429) return 'RATE_LIMITED'

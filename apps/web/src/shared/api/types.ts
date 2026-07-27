@@ -69,20 +69,23 @@ export type EventStatsQuery = NonNullable<operations['getEventStats']['parameter
 /* -------------------------------------------------------------------------- */
 
 /**
- * Stable error codes, in contract order.
- *
- * The contract types `error.code` as a plain `string` and enumerates the values
- * only in the field description, so this union cannot be generated. It is the
- * one API-shaped declaration written by hand, and the assertion below keeps it
- * assignable to whatever the generated schema says the field is. If the
- * contract is ever revised to model `error.code` as an `enum`, delete this list
- * and derive it from `ApiErrorBody` instead.
+ * Stable error codes, straight from the contract's `enum`.
  *
  * @see docs/api-contract/openapi.yaml — components.schemas.Error.error.code
  */
-export const API_ERROR_CODES = [
+export type ApiErrorCode = ApiErrorBody['error']['code']
+
+/**
+ * Runtime mirror of the contract's enum, in contract order.
+ *
+ * `schema.d.ts` is a declaration file, so the enum exists at type level only —
+ * there is no value to iterate at runtime, and the type guard below needs one.
+ * The mirror is guarded in both directions: `satisfies` rejects a code that is
+ * not in the contract, and `MissingErrorCodes` rejects a contract code that is
+ * missing here. Either way the compiler stops the drift.
+ */
+const API_ERROR_CODES = [
   'UNAUTHORIZED',
-  'FORBIDDEN',
   'VALIDATION_ERROR',
   'EVENT_NOT_FOUND',
   'EVENT_NOT_ACTIVE',
@@ -94,14 +97,12 @@ export const API_ERROR_CODES = [
   'TICKET_WRONG_EVENT',
   'RATE_LIMITED',
   'INTERNAL_ERROR',
-] as const
+] as const satisfies readonly ApiErrorCode[]
 
-export type ApiErrorCode = (typeof API_ERROR_CODES)[number]
-
-/** Compile-time guard: the hand-written union must stay valid for the contract. */
-type AssertAssignableToContract = ApiErrorCode extends ApiErrorBody['error']['code'] ? true : never
-const _codesMatchContract: AssertAssignableToContract = true
-void _codesMatchContract
+/** No contract code may be left out of the mirror above. */
+type MissingErrorCodes = Exclude<ApiErrorCode, (typeof API_ERROR_CODES)[number]>
+const _noMissingErrorCodes: [MissingErrorCodes] extends [never] ? true : never = true
+void _noMissingErrorCodes
 
 export function isApiErrorCode(value: unknown): value is ApiErrorCode {
   return typeof value === 'string' && (API_ERROR_CODES as readonly string[]).includes(value)

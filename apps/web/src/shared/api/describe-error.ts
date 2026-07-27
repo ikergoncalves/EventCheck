@@ -4,9 +4,9 @@ import type { ApiErrorCode } from './types'
 /**
  * Turns an error into a sentence the organizer can act on.
  *
- * The `switch` is exhaustive over the contract's codes: adding a code to
- * `API_ERROR_CODES` without handling it here is a compile error, which is the
- * whole point of keeping `ApiError['code']` a literal union.
+ * The `switch` is exhaustive over the contract's codes: adding a code to the
+ * contract without handling it here is a compile error, which is the whole
+ * point of keeping `ApiError['code']` a literal union.
  */
 export function describeError(error: unknown): string {
   if (!(error instanceof ApiError)) {
@@ -20,8 +20,6 @@ function messageForCode(code: ApiErrorCode, error: ApiError): string {
   switch (code) {
     case 'UNAUTHORIZED':
       return 'Your session has expired. Sign in again to continue.'
-    case 'FORBIDDEN':
-      return 'You do not have access to this resource.'
     case 'VALIDATION_ERROR':
       return 'Some of the submitted data is invalid.'
     case 'EVENT_NOT_FOUND':
