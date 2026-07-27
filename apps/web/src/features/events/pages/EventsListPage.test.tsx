@@ -14,6 +14,7 @@ describe('EventsListPage', () => {
     expect(screen.getByRole('status')).toHaveTextContent('Loading events…')
 
     expect(await screen.findByText('React Summit Brasil 2026')).toBeInTheDocument()
+    expect(screen.getByText('Sprint Review Aberta — Agosto')).toBeInTheDocument()
     expect(screen.getByText('Workshop: QR Code na portaria')).toBeInTheDocument()
     expect(screen.getByText('Meetup Frontend SP — Edição de Junho')).toBeInTheDocument()
 
@@ -21,7 +22,11 @@ describe('EventsListPage', () => {
     // tickets — 24 + 1 already-checked-in over 37 + 2 non-revoked.
     expect(screen.getByText('25 / 39')).toBeInTheDocument()
 
-    expect(screen.getByText('Published')).toBeInTheDocument()
+    // The upcoming event: 10 tickets plus its scenario one, nobody through the door.
+    expect(screen.getByText('0 / 11')).toBeInTheDocument()
+
+    // Two published events — the one running now and the one still days away.
+    expect(screen.getAllByText('Published')).toHaveLength(2)
     expect(screen.getByText('Draft')).toBeInTheDocument()
     expect(screen.getByText('Finished')).toBeInTheDocument()
   })
