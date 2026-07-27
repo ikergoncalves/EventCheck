@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: EventCheck API
-  version: 1.0.0
+  version: 1.1.0
   description: |
     Contrato de API do EventCheck — plataforma de eventos com check-in via QR Code.
 
@@ -26,6 +26,16 @@ info:
     Todo timestamp e ISO 8601 em UTC com sufixo `Z` (ex.: 2026-08-14T19:30:00Z).
     O campo `timezone` do evento (IANA, ex.: America/Sao_Paulo) e usado apenas
     para exibicao no cliente.
+
+    ## Janela de check-in
+    Um evento aceita check-in quando `status == published` **e** o instante
+    atual esta entre `starts_at - 12h` e `ends_at + 2h`. Fora dessa janela a
+    API responde 409 `EVENT_NOT_ACTIVE`.
+
+    Nao existe agendador no projeto: um evento `published` cujo `ends_at + 2h`
+    ja passou e promovido a `finished` de forma preguicosa, na primeira leitura
+    ou escrita que o toque. Backend e mock do frontend implementam a mesma
+    regra, com as mesmas duas constantes.
 
     ## Fases de implementacao
     - Fase 1: /health, /me, CRUD de eventos
@@ -458,6 +468,16 @@ paths:
 
         O frontend do scanner mapeia cada `error.code` para um estado visual
         distinto (verde / amarelo / vermelho) — por isso os codigos sao estaveis.
+
+        Precedencia dos erros, nesta ordem exata. Os dois lados dependem dela:
+        o mesmo QR lido na mesma situacao tem que produzir o mesmo codigo no
+        mock e no backend.
+
+        1. token nao corresponde a nenhum ingresso -> 404 `TICKET_NOT_FOUND`
+        2. ingresso pertence a outro evento -> 409 `TICKET_WRONG_EVENT`
+        3. evento fora da janela de check-in -> 409 `EVENT_NOT_ACTIVE`
+        4. ingresso revogado -> 409 `TICKET_REVOKED`
+        5. ingresso ja utilizado -> 409 `TICKET_ALREADY_CHECKED_IN`
       operationId: createCheckIn
       requestBody:
         required: true
@@ -716,11 +736,25 @@ components:
             code:
               type: string
               description: |
-                Codigo estavel. Valores possiveis: UNAUTHORIZED, FORBIDDEN,
-                VALIDATION_ERROR, EVENT_NOT_FOUND, EVENT_NOT_ACTIVE,
-                EVENT_IMMUTABLE, EVENT_CAPACITY_EXCEEDED, TICKET_NOT_FOUND,
-                TICKET_ALREADY_CHECKED_IN, TICKET_REVOKED, TICKET_WRONG_EVENT,
-                RATE_LIMITED, INTERNAL_ERROR.
+                Codigo estavel de erro. O frontend faz `switch` sobre ele com
+                exaustividade verificada pelo compilador, entao a lista e
+                fechada: introduzir um codigo novo exige alterar este contrato.
+
+                Nao existe `FORBIDDEN`: recurso de outro organizador responde
+                404, para nao confirmar a existencia de dados alheios.
+              enum:
+                - UNAUTHORIZED
+                - VALIDATION_ERROR
+                - EVENT_NOT_FOUND
+                - EVENT_NOT_ACTIVE
+                - EVENT_IMMUTABLE
+                - EVENT_CAPACITY_EXCEEDED
+                - TICKET_NOT_FOUND
+                - TICKET_ALREADY_CHECKED_IN
+                - TICKET_REVOKED
+                - TICKET_WRONG_EVENT
+                - RATE_LIMITED
+                - INTERNAL_ERROR
               example: TICKET_ALREADY_CHECKED_IN
             message:
               type: string
@@ -766,6 +800,11 @@ components:
 
     EventStatus:
       type: string
+      description: |
+        `draft` -> `published` via a rota de publicacao; `published` ->
+        `finished` de forma preguicosa depois de `ends_at + 2h` (ver "Janela de
+        check-in"); `cancelled` vem do soft delete. `finished` e `cancelled`
+        sao terminais.
       enum: [draft, published, finished, cancelled]
 
     Event:
@@ -988,7 +1027,7 @@ components:
 
     CheckIn:
       type: object
-      required: [id, ticket_id, event_id, checked_in_at]
+      required: [id, ticket_id, event_id, attendee_name, checked_in_at]
       properties:
         id:
           type: string
