@@ -15,6 +15,7 @@ import type {
   TicketStatus,
   TimelineBucket,
 } from '../shared/api/types'
+import { resolveEventStatus } from '../shared/lib/check-in-window'
 import { type Database, type EventRecord, type TicketRecord, seedDatabase } from './fixtures'
 
 let db: Database = seedDatabase()
@@ -45,8 +46,22 @@ function countCheckedIn(eventId: string): number {
   return ticketsOf(eventId).filter((ticket) => ticket.status === 'checked_in').length
 }
 
+/**
+ * Applies the contract's lazy `published` -> `finished` transition, in place.
+ *
+ * There is no scheduler here either, so the promotion has to happen on the
+ * first access that touches the record — reads included. Persisting it means a
+ * later write (a PATCH, say) sees the same status the last GET reported.
+ */
+function refreshEventStatus(record: EventRecord): EventRecord {
+  record.status = resolveEventStatus(record, Date.now())
+  return record
+}
+
 /** Projects a stored record into the contract's `Event` shape. */
 export function toEvent(record: EventRecord): Event {
+  refreshEventStatus(record)
+
   return {
     ...record,
     tickets_issued: countIssued(record.id),
@@ -65,7 +80,9 @@ export function toTicket(record: TicketRecord): Ticket {
 /* -------------------------------------------------------------------------- */
 
 export function findEvent(eventId: string): EventRecord | undefined {
-  return db.events.find((event) => event.id === eventId)
+  const record = db.events.find((event) => event.id === eventId)
+  // Writes look the record up too, so this is where "first access" is honoured.
+  return record === undefined ? undefined : refreshEventStatus(record)
 }
 
 export function findTicket(ticketId: string): TicketRecord | undefined {
@@ -85,7 +102,9 @@ export interface ListEventsOptions {
 export function listEvents(options: ListEventsOptions = {}): Event[] {
   const { status, search, sort = '-starts_at' } = options
 
-  let result = db.events
+  // Project first: the status filter has to see the lazily resolved status,
+  // not the one the record was seeded with.
+  let result = db.events.map(toEvent)
   if (status && status.length > 0) result = result.filter((e) => status.includes(e.status))
   if (search) {
     const needle = search.toLowerCase()
@@ -95,12 +114,10 @@ export function listEvents(options: ListEventsOptions = {}): Event[] {
   const descending = sort.startsWith('-')
   const field = (descending ? sort.slice(1) : sort) as 'starts_at' | 'created_at'
 
-  return [...result]
-    .sort((a, b) => {
-      const delta = Date.parse(a[field]) - Date.parse(b[field])
-      return descending ? -delta : delta
-    })
-    .map(toEvent)
+  return result.sort((a, b) => {
+    const delta = Date.parse(a[field]) - Date.parse(b[field])
+    return descending ? -delta : delta
+  })
 }
 
 export interface ListTicketsOptions {

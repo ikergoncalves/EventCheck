@@ -34,6 +34,8 @@ export const EVENT_IDS = {
   published: '22222222-2222-4222-8222-222222222222',
   finished: '33333333-3333-4333-8333-333333333333',
   cancelled: '44444444-4444-4444-8444-444444444444',
+  /** Published, but still days away — the check-in window has not opened yet. */
+  upcoming: '55555555-5555-4555-8555-555555555555',
 } as const
 
 /**
@@ -56,6 +58,8 @@ export const DEV_TOKENS = {
   wrongEvent: 'devWrongEventTicketToken00000000',
   /** Valid ticket on the finished event → 409 EVENT_NOT_ACTIVE. */
   eventNotActive: 'devFinishedEventTicketToken00000',
+  /** Valid ticket on a published event whose window has not opened → 409 EVENT_NOT_ACTIVE. */
+  beforeWindow: 'devBeforeWindowToken000000000000',
 } as const
 
 const MINUTE = 60_000
@@ -168,6 +172,26 @@ export function seedDatabase(now: number = Date.now()): Database {
       status: 'published',
       created_at: iso(now - 45 * DAY),
       updated_at: iso(now - 2 * HOUR),
+    },
+    {
+      /*
+       * Published, starting in five days: outside the check-in window, which
+       * only opens 12 hours before `starts_at`. Scanning one of its tickets is
+       * the EVENT_NOT_ACTIVE case that has nothing to do with the status.
+       */
+      id: EVENT_IDS.upcoming,
+      organizer_id: ORGANIZER_ID,
+      title: 'Sprint Review Aberta — Agosto',
+      description: 'Open review of the quarter roadmap, followed by Q&A.',
+      starts_at: iso(now + 5 * DAY),
+      ends_at: iso(now + 5 * DAY + 3 * HOUR),
+      timezone: 'America/Sao_Paulo',
+      venue_name: 'Auditório Vila Madalena',
+      address: 'R. Harmonia, 200 — Vila Madalena, São Paulo',
+      capacity: 50,
+      status: 'published',
+      created_at: iso(now - 12 * DAY),
+      updated_at: iso(now - 6 * DAY),
     },
     {
       id: EVENT_IDS.draft,
@@ -346,6 +370,34 @@ export function seedDatabase(now: number = Date.now()): Database {
     checked_in_at: null,
     qr_token: DEV_TOKENS.eventNotActive,
   })
+
+  // Valid on a published event whose window has not opened → 409 EVENT_NOT_ACTIVE.
+  tickets.push({
+    id: uuid('b0000000', 6),
+    event_id: EVENT_IDS.upcoming,
+    attendee_name: 'Dev Before Window',
+    attendee_email: 'dev.before.window@example.com',
+    tier: 'Standard',
+    status: 'valid',
+    issued_at: iso(now - 6 * DAY),
+    checked_in_at: null,
+    qr_token: DEV_TOKENS.beforeWindow,
+  })
+
+  /* Upcoming event: tickets already issued, none used — the window is shut. */
+  for (let index = 0; index < 10; index += 1) {
+    tickets.push({
+      id: uuid('a1000000', index + 1),
+      event_id: EVENT_IDS.upcoming,
+      attendee_name: ATTENDEE_NAMES[index],
+      attendee_email: `${slugify(ATTENDEE_NAMES[index])}@example.com`,
+      tier: index % 5 === 0 ? 'VIP' : 'Standard',
+      status: 'valid',
+      issued_at: iso(now - 6 * DAY + index * MINUTE),
+      checked_in_at: null,
+      qr_token: seededToken('upcTicket', index + 1),
+    })
+  }
 
   /* Finished event: a small, fully resolved attendance history. */
   const finishedStart = now - 44 * DAY

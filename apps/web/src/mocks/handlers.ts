@@ -7,6 +7,11 @@
  */
 import { HttpResponse, http } from 'msw'
 import { API_BASE_URL, API_V1 } from '../shared/api/config'
+import {
+  checkInClosesAt,
+  checkInOpensAt,
+  isWithinCheckInWindow,
+} from '../shared/lib/check-in-window'
 import type {
   ApiErrorCode,
   CheckInCreate,
@@ -73,11 +78,6 @@ function paginate<T>(items: T[], url: URL, defaultPageSize: number): Page & { it
     total_pages: Math.max(1, Math.ceil(items.length / pageSize)),
     items: items.slice(start, start + pageSize),
   }
-}
-
-/** Events past their end date, or not yet published, cannot take check-ins. */
-function isAcceptingCheckIns(status: string): boolean {
-  return status === 'published'
 }
 
 /** Stands in for the server's process uptime on `/health`. */
@@ -305,9 +305,12 @@ export const handlers = [
     if (!ticket) return ticketNotFound()
 
     /*
-     * Ordering note: identity first (does this ticket belong here?), then the
-     * event's window, then the ticket's own state. The contract lists the codes
-     * but not their precedence, so this is a mock-side decision.
+     * The order of the branches below is the contract's precedence, and the
+     * backend follows the same one: the same QR in the same situation has to
+     * produce the same code on both sides.
+     *
+     *   TICKET_NOT_FOUND -> TICKET_WRONG_EVENT -> EVENT_NOT_ACTIVE
+     *   -> TICKET_REVOKED -> TICKET_ALREADY_CHECKED_IN
      */
     if (ticket.event_id !== eventId) {
       return errorResponse(409, 'TICKET_WRONG_EVENT', 'This ticket belongs to another event.', {
@@ -316,12 +319,16 @@ export const handlers = [
       })
     }
 
-    if (!isAcceptingCheckIns(record.status)) {
+    if (!isWithinCheckInWindow(record, Date.now())) {
       return errorResponse(
         409,
         'EVENT_NOT_ACTIVE',
         'This event is not accepting check-ins right now.',
-        { status: record.status },
+        {
+          status: record.status,
+          check_in_opens_at: new Date(checkInOpensAt(record)).toISOString(),
+          check_in_closes_at: new Date(checkInClosesAt(record)).toISOString(),
+        },
       )
     }
 
