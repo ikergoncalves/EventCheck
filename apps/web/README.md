@@ -51,14 +51,54 @@ flag is off.
 `docs/api-contract/openapi.yaml` is the single source of truth. `npm run api:types`
 regenerates `src/shared/api/schema.d.ts`, and `src/shared/api/types.ts` re-exports
 readable aliases (`Event`, `Ticket`, `CheckIn`, `EventStats`, …) from it. **No
-API payload type is written by hand.**
+API payload type is written by hand — there is no exception.** Error codes
+included: `ApiErrorCode` is `ApiErrorBody['error']['code']`, the contract's own
+`enum`.
 
-The one exception is documented in `types.ts`: the contract declares
-`error.code` as a plain `string` and lists the valid values only in the field
-description, so `API_ERROR_CODES` cannot be generated. It is declared once, with
-a compile-time assertion keeping it assignable to the generated type. If the
-contract is ever revised to model that field as an `enum`, delete the list and
-derive it instead.
+`schema.d.ts` is a declaration file, though, so that enum exists at type level
+only. There is no value to iterate at runtime, and the `isApiErrorCode` type
+guard needs one. So `types.ts` keeps an array as a **runtime mirror** of the
+enum, watched by the compiler in both directions:
+
+- `satisfies readonly ApiErrorCode[]` rejects a code the contract does not have;
+- `Exclude<ApiErrorCode, (typeof API_ERROR_CODES)[number]>` has to stay `never`,
+  which rejects a contract code the mirror left out.
+
+Adding or dropping a code in the contract therefore breaks the build until the
+mirror follows — one of the two guards always fires, so the list cannot drift
+past the next `tsc`.
+
+## Check-in window
+
+An event accepts check-ins when its status is `published` **and** the current
+instant sits between `starts_at − 12h` and `ends_at + 2h`. Anywhere outside
+that window the API answers `409 EVENT_NOT_ACTIVE`, whatever the ticket looks
+like.
+
+`src/shared/lib/check-in-window.ts` holds the rule as pure functions. The two
+constants are mirrored by the backend, so their names are part of the
+cross-repo agreement:
+
+| Constant                            | Value | Meaning                                       |
+| ----------------------------------- | ----- | --------------------------------------------- |
+| `CHECK_IN_OPENS_BEFORE_START_HOURS` | `12`  | The window opens this long before `starts_at` |
+| `CHECK_IN_CLOSES_AFTER_END_HOURS`   | `2`   | The window closes this long after `ends_at`   |
+
+- `isWithinCheckInWindow(event, now)` — whether a scan can be accepted;
+- `resolveEventStatus(event, now)` — `'finished'` for a `published` event whose
+  window has closed, the current status otherwise.
+
+Both bounds are inclusive: the contract closes the window on "`ends_at + 2h`
+already past", so at that exact instant the event is still open, and still
+`published`. `now` is always an argument and never `Date.now()` read from
+inside, which is what lets the tests pin both edges to the minute.
+
+Nothing runs on a schedule in this project, so the `published` → `finished`
+transition is **lazy** — it happens on the first read or write that touches the
+event. The mock database applies it in `findEvent()` and `toEvent()` and
+persists it on the record, so a `GET` and a later `PATCH` never disagree about
+a status. The QR scanner will reuse the same module in a later phase to explain
+a refused read before it even reaches the network.
 
 ## API mocks
 
@@ -73,15 +113,18 @@ than stored, so they cannot drift.
 
 ### Seeded events
 
-| Event                                | Status      | Notes                                                   |
-| ------------------------------------ | ----------- | ------------------------------------------------------- |
-| React Summit Brasil 2026             | `published` | In progress right now; 43 tickets, peak check-in window |
-| Workshop: QR Code na portaria        | `draft`     | Capacity 30, one ticket issued                          |
-| Meetup Frontend SP — Edição de Junho | `finished`  | Fully resolved attendance history                       |
-| Hackathon EventCheck (adiado)        | `cancelled` | Tickets revoked along with the event                    |
+| Event                                | Status      | Notes                                                      |
+| ------------------------------------ | ----------- | ---------------------------------------------------------- |
+| React Summit Brasil 2026             | `published` | In progress right now; 43 tickets, peak check-in window    |
+| Sprint Review Aberta — Agosto        | `published` | Starts in 5 days: 11 tickets, but the window is still shut |
+| Workshop: QR Code na portaria        | `draft`     | Capacity 30, one ticket issued                             |
+| Meetup Frontend SP — Edição de Junho | `finished`  | Fully resolved attendance history                          |
+| Hackathon EventCheck (adiado)        | `cancelled` | Tickets revoked along with the event                       |
 
 Timestamps are generated relative to the moment the mock database is seeded, so
 the published event is always live and its check-in timeline always meaningful.
+The two published events are what make the window observable: same status,
+opposite answers to a scan.
 
 ### Fixed tokens for the check-in error paths
 
@@ -96,7 +139,8 @@ Every check-in branch of the contract can be triggered on purpose. Tokens are
 | `devAlreadyCheckedInToken00000000` | published event | `409 TICKET_ALREADY_CHECKED_IN`, original check-in in `error.details` |
 | `devRevokedTicketToken00000000000` | published event | `409 TICKET_REVOKED`                                                  |
 | `devWrongEventTicketToken00000000` | published event | `409 TICKET_WRONG_EVENT` (the ticket belongs to the draft event)      |
-| `devFinishedEventTicketToken00000` | finished event  | `409 EVENT_NOT_ACTIVE`                                                |
+| `devFinishedEventTicketToken00000` | finished event  | `409 EVENT_NOT_ACTIVE` (the event is over)                            |
+| `devBeforeWindowToken000000000000` | upcoming event  | `409 EVENT_NOT_ACTIVE` (published, but the window has not opened)     |
 
 The happy-path token is single use: once scanned it becomes a
 `TICKET_ALREADY_CHECKED_IN` case until the page is reloaded (browser) or the
@@ -105,8 +149,15 @@ next test resets the database.
 MSW intercepts `fetch` from inside the page — it is not a standalone server, so
 these routes are exercised through the app or the test suite, not `curl`.
 
-Published event id, for building URLs by hand:
-`22222222-2222-4222-8222-222222222222`.
+The check-in error codes follow the contract's precedence, in this exact order:
+`TICKET_NOT_FOUND` → `TICKET_WRONG_EVENT` → `EVENT_NOT_ACTIVE` →
+`TICKET_REVOKED` → `TICKET_ALREADY_CHECKED_IN`. A revoked ticket on an event
+outside its window answers `EVENT_NOT_ACTIVE`, not `TICKET_REVOKED`.
+
+Event ids, for building URLs by hand:
+
+- published (live): `22222222-2222-4222-8222-222222222222`
+- upcoming (window shut): `55555555-5555-4555-8555-555555555555`
 
 ## Layout
 
@@ -121,7 +172,7 @@ src/
   shared/
     api/          # HTTP client, generated types, query hooks, error mapping
     ui/           # reusable presentational components
-    lib/          # pure helpers (dates, formatting)
+    lib/          # pure helpers (dates, formatting, check-in window)
     hooks/
   mocks/          # MSW handlers, fixtures, in-memory db, worker and server
   test/           # Vitest setup and render helpers
