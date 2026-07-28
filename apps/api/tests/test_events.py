@@ -93,7 +93,7 @@ async def test_publish_with_past_starts_at_is_409(
     response = await client.post(f"/api/v1/events/{event_id}/publish", headers=headers)
 
     assert response.status_code == 409
-    assert response.json()["error"]["code"] == "EVENT_IMMUTABLE"
+    assert response.json()["error"]["code"] == "EVENT_NOT_ACTIVE"
 
 
 async def test_lazy_transition_marks_published_event_finished(

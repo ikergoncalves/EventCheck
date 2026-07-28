@@ -215,7 +215,7 @@ async def publish_event(
         raise ConflictError("Only draft events can be published.", code=ErrorCode.EVENT_IMMUTABLE)
     if event.starts_at <= now:
         raise ConflictError(
-            "starts_at must be in the future to publish.", code=ErrorCode.EVENT_IMMUTABLE
+            "starts_at must be in the future to publish.", code=ErrorCode.EVENT_NOT_ACTIVE
         )
 
     event.status = EventStatus.published.value
