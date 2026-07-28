@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: EventCheck API
-  version: 1.2.0
+  version: 1.3.0
   description: |
     Contrato de API do EventCheck — plataforma de eventos com check-in via QR Code.
 
@@ -12,10 +12,18 @@ info:
 
     ## Autenticacao
     A identidade e provida pelo Supabase Auth. O frontend autentica o organizador
-    direto no Supabase e recebe um JWT (HS256, assinado com o JWT secret do
-    projeto). Esse JWT vai em `Authorization: Bearer <token>` em toda rota
-    protegida. O backend NAO emite tokens: ele apenas valida a assinatura, o
-    `exp` e a `aud`, e usa a claim `sub` como `organizer_id`.
+    direto no Supabase e recebe um JWT assinado com **chave assimetrica (ES256)**.
+    Esse JWT vai em `Authorization: Bearer <token>` em toda rota protegida.
+
+    O backend NAO emite tokens e NAO guarda segredo de assinatura. Ele busca as
+    chaves publicas no endpoint JWKS do projeto Supabase, com cache em memoria, e
+    valida assinatura, `exp`, `iss` e `aud`. A claim `sub` e o `organizer_id`.
+
+    O segredo compartilhado HS256 (legado) nao e usado. Verificar com ele daria
+    ao backend a capacidade de forjar tokens de qualquer usuario — quem verifica
+    passa a poder assinar — e o proprio Supabase desaconselha a pratica. Como
+    efeito colateral util, a unica credencial secreta do backend passa a ser a
+    string de conexao do banco.
 
     ## Formato de erro
     Toda resposta de erro (4xx/5xx) usa o mesmo envelope `Error`. O campo
@@ -681,7 +689,7 @@ components:
       type: http
       scheme: bearer
       bearerFormat: JWT
-      description: JWT emitido pelo Supabase Auth, validado pelo backend com o JWT secret do projeto.
+      description: JWT ES256 emitido pelo Supabase Auth, validado pelo backend contra o JWKS publico do projeto.
 
   parameters:
     EventId:
