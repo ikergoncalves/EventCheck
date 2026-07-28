@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: eventcheck
+      POSTGRES_PASSWORD: eventcheck
+      POSTGRES_DB: eventcheck
+    ports:
+      - "5432:5432"
+    volumes:
+      - eventcheck-postgres:/var/lib/postgresql/data
+      - ./docker/init-test-db.sql:/docker-entrypoint-initdb.d/init-test-db.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U eventcheck -d eventcheck"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  eventcheck-postgres:
