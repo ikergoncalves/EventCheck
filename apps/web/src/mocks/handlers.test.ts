@@ -4,6 +4,7 @@
  * counters consistent across calls.
  */
 import { describe, expect, it } from 'vitest'
+import { readFieldErrors } from '../shared/api/field-errors'
 import { apiFetch } from '../shared/api/http'
 import type {
   CheckInResult,
@@ -118,6 +119,116 @@ describe('lazy finished transition', () => {
 
     expect(error.status).toBe(409)
     expect(error.code).toBe('EVENT_IMMUTABLE')
+  })
+})
+
+/**
+ * The lifecycle rules the contract grew after Phase 1 shipped.
+ *
+ * Each one exists because the frontend now offers the operation, and the UI
+ * hiding an impossible button is not the same as the API refusing it: the
+ * status on screen was read in the past, and the lazy `published` -> `finished`
+ * promotion moves it with nobody clicking anything.
+ */
+describe('event lifecycle rules', () => {
+  it('409 EVENT_IMMUTABLE on PATCH of a cancelled event', async () => {
+    const error = await expectApiError(
+      apiFetch(`/api/v1/events/${EVENT_IDS.cancelled}`, {
+        method: 'PATCH',
+        body: { title: 'Trying to revive it' },
+      }),
+    )
+
+    expect(error.status).toBe(409)
+    expect(error.code).toBe('EVENT_IMMUTABLE')
+  })
+
+  it('409 EVENT_IMMUTABLE on PATCH of a finished event', async () => {
+    const error = await expectApiError(
+      apiFetch(`/api/v1/events/${EVENT_IDS.finished}`, {
+        method: 'PATCH',
+        body: { title: 'Rewriting history' },
+      }),
+    )
+
+    expect(error.status).toBe(409)
+    expect(error.code).toBe('EVENT_IMMUTABLE')
+  })
+
+  it('422 on ends_at when a published event is moved into the past', async () => {
+    // Closing an event early is not a supported operation — an event finishes
+    // when its check-in window closes, and PATCH is not the back door to it.
+    const error = await expectApiError(
+      apiFetch(`/api/v1/events/${EVENT_IDS.published}`, {
+        method: 'PATCH',
+        body: { ends_at: new Date(Date.now() - DAY).toISOString() },
+      }),
+    )
+
+    expect(error.status).toBe(422)
+    expect(error.code).toBe('VALIDATION_ERROR')
+
+    // Read through the same parser the form uses, so the mock is proven to
+    // answer in the shape the UI actually consumes.
+    const fields = readFieldErrors(error)
+    expect(fields).toHaveLength(1)
+    expect(fields[0].field).toBe('ends_at')
+    expect(fields[0].message).toContain('past')
+  })
+
+  it('accepts moving ends_at further into the future on a published event', async () => {
+    const later = new Date(Date.now() + 6 * 60 * 60 * 1000).toISOString()
+
+    const updated = await apiFetch<Event>(`/api/v1/events/${EVENT_IDS.published}`, {
+      method: 'PATCH',
+      body: { ends_at: later },
+    })
+
+    expect(updated.ends_at).toBe(later)
+    expect(updated.status).toBe('published')
+  })
+
+  it('409 EVENT_IMMUTABLE on DELETE of a finished event', async () => {
+    const error = await expectApiError(
+      apiFetch(`/api/v1/events/${EVENT_IDS.finished}`, { method: 'DELETE' }),
+    )
+
+    expect(error.status).toBe(409)
+    expect(error.code).toBe('EVENT_IMMUTABLE')
+  })
+
+  it('409 EVENT_IMMUTABLE on DELETE of an event the lazy transition finished', async () => {
+    // Seeded three days back, so the live event's window closed long ago and
+    // nothing has touched the record since. The DELETE itself must notice.
+    resetDb(Date.now() - 3 * DAY)
+
+    const error = await expectApiError(
+      apiFetch(`/api/v1/events/${EVENT_IDS.published}`, { method: 'DELETE' }),
+    )
+
+    expect(error.status).toBe(409)
+    expect(error.code).toBe('EVENT_IMMUTABLE')
+  })
+
+  it('409 EVENT_IMMUTABLE on DELETE of an already cancelled event', async () => {
+    const error = await expectApiError(
+      apiFetch(`/api/v1/events/${EVENT_IDS.cancelled}`, { method: 'DELETE' }),
+    )
+
+    expect(error.status).toBe(409)
+    expect(error.code).toBe('EVENT_IMMUTABLE')
+  })
+
+  it('cancels a draft event and revokes its valid tickets', async () => {
+    await expect(
+      apiFetch(`/api/v1/events/${EVENT_IDS.draft}`, { method: 'DELETE' }),
+    ).resolves.toBeUndefined()
+
+    const event = await apiFetch<Event>(`/api/v1/events/${EVENT_IDS.draft}`)
+
+    expect(event.status).toBe('cancelled')
+    // `tickets_issued` counts non-revoked tickets, so the soft delete empties it.
+    expect(event.tickets_issued).toBe(0)
   })
 })
 

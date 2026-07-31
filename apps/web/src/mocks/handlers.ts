@@ -65,6 +65,21 @@ function errorResponse(
 const eventNotFound = () => errorResponse(404, 'EVENT_NOT_FOUND', 'Event not found.')
 const ticketNotFound = () => errorResponse(404, 'TICKET_NOT_FOUND', 'Ticket not found.')
 
+/**
+ * A 422 in the shape the contract documents, naming the offending field.
+ *
+ * The frontend reads `details.fields` to put the message on the control it
+ * belongs to, so a mock that answered with a bare message would leave that
+ * path untested.
+ */
+const validationError = (field: string, message: string) =>
+  errorResponse(422, 'VALIDATION_ERROR', 'Request body is invalid.', {
+    fields: [{ field, message }],
+  })
+
+/** The contract's `EventCreate.title` lower bound. */
+const TITLE_MIN_LENGTH = 3
+
 /** Slices an array the way the contract's `Page` envelope describes. */
 function paginate<T>(items: T[], url: URL, defaultPageSize: number): Page & { items: T[] } {
   const page = Math.max(1, Number(url.searchParams.get('page') ?? 1))
@@ -120,15 +135,11 @@ export const handlers = [
   http.post(`${API_V1}/events`, async ({ request }) => {
     const body = (await request.json()) as EventCreate
 
-    if (!body.title || body.title.length < 3) {
-      return errorResponse(422, 'VALIDATION_ERROR', 'Request body is invalid.', {
-        fields: [{ field: 'title', message: 'must be at least 3 characters long' }],
-      })
+    if (!body.title || body.title.length < TITLE_MIN_LENGTH) {
+      return validationError('title', 'must be at least 3 characters long')
     }
     if (Date.parse(body.ends_at) <= Date.parse(body.starts_at)) {
-      return errorResponse(422, 'VALIDATION_ERROR', 'Request body is invalid.', {
-        fields: [{ field: 'ends_at', message: 'must be after starts_at' }],
-      })
+      return validationError('ends_at', 'must be after starts_at')
     }
 
     const event = createEvent(body)
@@ -145,6 +156,9 @@ export const handlers = [
   }),
 
   http.patch(`${API_V1}/events/:event_id`, async ({ params, request }) => {
+    // `findEvent` applies the lazy `published` -> `finished` promotion, so an
+    // event whose window closed while this page was open is already terminal
+    // by the time the checks below run — nobody had to click anything.
     const record = findEvent(String(params.event_id))
     if (!record) return eventNotFound()
 
@@ -157,6 +171,32 @@ export const handlers = [
       return errorResponse(422, 'VALIDATION_ERROR', 'At least one field must be sent.')
     }
 
+    if (body.title !== undefined && body.title.length < TITLE_MIN_LENGTH) {
+      return validationError('title', 'must be at least 3 characters long')
+    }
+
+    /*
+     * Ending a published event ahead of time is not a supported operation: an
+     * event finishes when its check-in window closes, and editing dates must
+     * not become the back door to that. The contract spells this out on the
+     * PATCH operation, and answers 422 on `ends_at` rather than a 409.
+     */
+    if (
+      record.status === 'published' &&
+      body.ends_at !== undefined &&
+      Date.parse(body.ends_at) < Date.now()
+    ) {
+      return validationError('ends_at', 'cannot be moved to the past on a published event')
+    }
+
+    // Absent fields keep their stored value, so the ordering invariant has to
+    // be checked against the merged result rather than against the body alone.
+    const nextStartsAt = body.starts_at ?? record.starts_at
+    const nextEndsAt = body.ends_at ?? record.ends_at
+    if (Date.parse(nextEndsAt) <= Date.parse(nextStartsAt)) {
+      return validationError('ends_at', 'must be after starts_at')
+    }
+
     return HttpResponse.json(updateEvent(record, body))
   }),
 
@@ -164,8 +204,15 @@ export const handlers = [
     const record = findEvent(String(params.event_id))
     if (!record) return eventNotFound()
 
-    if (record.status === 'cancelled') {
-      return errorResponse(409, 'EVENT_IMMUTABLE', 'Event is already cancelled.')
+    /*
+     * Both terminal statuses refuse the soft delete, and `finished` is the
+     * one that matters: cancelling an event that already happened would revoke
+     * the tickets of everybody who walked through the door and rewrite
+     * attendance after the fact. Events promoted to `finished` by the lazy
+     * transition are covered — `findEvent` above has already applied it.
+     */
+    if (record.status === 'finished' || record.status === 'cancelled') {
+      return errorResponse(409, 'EVENT_IMMUTABLE', `A ${record.status} event cannot be cancelled.`)
     }
 
     cancelEvent(record)

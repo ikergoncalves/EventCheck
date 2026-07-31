@@ -1,11 +1,16 @@
-import { ArrowLeft, CalendarDays, MapPin, Ticket } from 'lucide-react'
+import { ArrowLeft, CalendarDays, MapPin, Pencil, Send, Ticket, Trash2 } from 'lucide-react'
+import { useState } from 'react'
 import { Link, useParams } from 'react-router'
-import { useEvent } from '../api'
 import { describeError } from '../../../shared/api/describe-error'
+import type { Event } from '../../../shared/api/types'
 import { formatEventDateRange } from '../../../shared/lib/datetime'
 import { formatPercentage, formatRatio } from '../../../shared/lib/format'
+import { ConfirmDialog } from '../../../shared/ui/ConfirmDialog'
+import { Button, FormAlert } from '../../../shared/ui/form'
 import { StatusBadge } from '../../../shared/ui/StatusBadge'
 import { EmptyState, ErrorState, LoadingState } from '../../../shared/ui/states'
+import { useCancelEvent, useEvent, usePublishEvent } from '../api'
+import { isCancellable, isEditable, isPublishable } from '../event-actions'
 
 function Stat({ label, value, hint }: { label: string; value: string; hint?: string }) {
   return (
@@ -14,6 +19,92 @@ function Stat({ label, value, hint }: { label: string; value: string; hint?: str
       <p className="mt-1 text-2xl font-semibold text-slate-900">{value}</p>
       {hint && <p className="mt-1 text-xs text-slate-500">{hint}</p>}
     </div>
+  )
+}
+
+/**
+ * The lifecycle controls.
+ *
+ * Impossible actions are not rendered — but the ones that are rendered still
+ * assume they might be refused. The status behind these buttons was read when
+ * the page loaded, and the contract promotes a `published` event to `finished`
+ * on the first read or write after its check-in window closes, without anyone
+ * doing anything. So a `409` here is an ordinary outcome, not an exception:
+ * it is reported in place, and the invalidation that follows every mutation
+ * re-reads the event so the buttons settle on what is actually possible.
+ */
+function EventActions({ event }: { event: Event }) {
+  const publishEvent = usePublishEvent(event.id)
+  const cancelEvent = useCancelEvent(event.id)
+
+  const [isConfirmingCancel, setIsConfirmingCancel] = useState(false)
+
+  const conflict = publishEvent.error ?? cancelEvent.error
+
+  return (
+    <>
+      {conflict && !isConfirmingCancel && (
+        <div className="mb-4">
+          <FormAlert>{describeError(conflict)}</FormAlert>
+        </div>
+      )}
+
+      <div className="flex flex-wrap gap-2">
+        {isEditable(event.status) && (
+          <Link
+            to={`/events/${event.id}/edit`}
+            className="inline-flex items-center justify-center gap-1.5 rounded-md border border-slate-300 bg-white px-3.5 py-2 text-sm font-medium text-slate-700 transition-colors hover:bg-slate-50"
+          >
+            <Pencil aria-hidden className="size-4" />
+            Edit
+          </Link>
+        )}
+
+        {isPublishable(event.status) && (
+          <Button
+            type="button"
+            onClick={() => publishEvent.mutate()}
+            disabled={publishEvent.isPending}
+          >
+            <Send aria-hidden className="size-4" />
+            {publishEvent.isPending ? 'Publishing…' : 'Publish'}
+          </Button>
+        )}
+
+        {isCancellable(event.status) && (
+          <Button
+            type="button"
+            variant="secondary"
+            onClick={() => {
+              cancelEvent.reset()
+              setIsConfirmingCancel(true)
+            }}
+          >
+            <Trash2 aria-hidden className="size-4" />
+            Cancel event
+          </Button>
+        )}
+      </div>
+
+      <ConfirmDialog
+        open={isConfirmingCancel}
+        title={`Cancel “${event.title}”?`}
+        description="The event moves to cancelled and every valid ticket for it is revoked — nobody will be able to check in. Check-ins already registered are kept as a record. This cannot be undone."
+        confirmLabel="Cancel the event"
+        pendingLabel="Cancelling…"
+        cancelLabel="Keep the event"
+        isPending={cancelEvent.isPending}
+        error={cancelEvent.error ? describeError(cancelEvent.error) : null}
+        onCancel={() => setIsConfirmingCancel(false)}
+        onConfirm={() => {
+          cancelEvent.mutate(undefined, {
+            // Stay open on failure so the reason is read where the decision
+            // was made; the refetch behind it corrects the buttons regardless.
+            onSuccess: () => setIsConfirmingCancel(false),
+          })
+        }}
+      />
+    </>
   )
 }
 
@@ -76,6 +167,10 @@ export function EventDetailPage() {
               )}
             </dl>
           </header>
+
+          <div className="mb-6">
+            <EventActions event={event} />
+          </div>
 
           <div className="grid gap-3 sm:grid-cols-3">
             <Stat

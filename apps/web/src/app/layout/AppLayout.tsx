@@ -1,12 +1,13 @@
-import { CalendarDays, LayoutDashboard, QrCode, ScanLine, Ticket } from 'lucide-react'
-import type { ComponentType } from 'react'
-import { NavLink, Outlet } from 'react-router'
+import { CalendarDays, LayoutDashboard, LogOut, QrCode, ScanLine, Ticket } from 'lucide-react'
+import { useState, type ComponentType } from 'react'
+import { NavLink, Outlet, useNavigate } from 'react-router'
+import { useAuth } from '../../shared/auth/useAuth'
 
 interface NavItem {
   to: string
   label: string
   icon: ComponentType<{ className?: string; 'aria-hidden'?: boolean }>
-  /** Phases 2–4 land these; shown disabled so the shape of the app is visible. */
+  /** Phases 3–4 land these; shown disabled so the shape of the app is visible. */
   enabled: boolean
 }
 
@@ -18,6 +19,22 @@ const NAV_ITEMS: NavItem[] = [
 ]
 
 export function AppLayout() {
+  const { user, signOut } = useAuth()
+  const navigate = useNavigate()
+  const [isSigningOut, setIsSigningOut] = useState(false)
+
+  const handleSignOut = async (): Promise<void> => {
+    setIsSigningOut(true)
+    try {
+      await signOut()
+      // Signing out is a deliberate exit, so the next sign-in starts fresh
+      // rather than resuming the page they happened to be on.
+      void navigate('/login', { replace: true })
+    } finally {
+      setIsSigningOut(false)
+    }
+  }
+
   return (
     <div className="min-h-dvh bg-slate-50 text-slate-900">
       <header className="border-b border-slate-200 bg-white">
@@ -25,8 +42,25 @@ export function AppLayout() {
           <QrCode aria-hidden className="size-5 text-emerald-600" />
           <span className="font-semibold">EventCheck</span>
           <span className="ml-2 rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-600">
-            Phase 1
+            Phase 2
           </span>
+
+          <div className="ml-auto flex items-center gap-3">
+            {user?.email && (
+              <span className="hidden text-sm text-slate-600 sm:inline" title={user.email}>
+                {user.email}
+              </span>
+            )}
+            <button
+              type="button"
+              onClick={() => void handleSignOut()}
+              disabled={isSigningOut}
+              className="inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              <LogOut aria-hidden className="size-4" />
+              {isSigningOut ? 'Signing out…' : 'Sign out'}
+            </button>
+          </div>
         </div>
       </header>
 
