@@ -2,6 +2,7 @@ import { QueryClientProvider } from '@tanstack/react-query'
 import { useState, type ReactNode } from 'react'
 import { BrowserRouter } from 'react-router'
 import { createQueryClient } from '../shared/api/query-client'
+import { AuthProvider } from '../shared/auth/AuthProvider'
 import { ErrorBoundary } from './ErrorBoundary'
 
 export function AppProviders({ children }: { children: ReactNode }) {
@@ -11,7 +12,10 @@ export function AppProviders({ children }: { children: ReactNode }) {
   return (
     <ErrorBoundary>
       <QueryClientProvider client={queryClient}>
-        <BrowserRouter>{children}</BrowserRouter>
+        {/* Inside the query provider: signing out clears that cache. */}
+        <AuthProvider>
+          <BrowserRouter>{children}</BrowserRouter>
+        </AuthProvider>
       </QueryClientProvider>
     </ErrorBoundary>
   )
